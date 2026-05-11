@@ -6,12 +6,14 @@
   "field_coverage_on_translations": {
     "035_oclc": 0.9194,
     "245_a_czech_title": 1.0,
-    "240_a_original_title": 0.2589,
+    "240_a_original_title": 0.6239,
     "100_a_author": 0.883,
     "260_c": 0.7107,
     "264_c": 0.2893,
     "year_resolved": 0.9609,
     "765_link": 0.3793,
+    "765_z_original_isbn": 0.0,
+    "765_w_original_sysnum": 0.0,
     "655_a_genre": 0.8125,
     "020_isbn": 0.6801
   },
@@ -270,5 +272,5 @@
   "csv_file": "data/interim/nkc_translations.csv",
   "limit": null,
   "min_year": null,
-  "elapsed_seconds": 529.5
+  "elapsed_seconds": 446.8
 }

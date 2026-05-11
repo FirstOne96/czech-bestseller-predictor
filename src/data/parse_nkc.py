@@ -211,16 +211,31 @@ def extract_row(controls, datas) -> dict[str, str]:
             if h and h not in ("cze", "und") and h not in source_langs:
                 source_langs.append(h)
 
-    # 765 $t/$w: link to the other-language version this Czech edition was
-    # translated from. Both subfields are sparse but gold when present.
-    linked: list[str] = []
+   # 765 $t: název originálu (pokud 240$a chybí, toto je záloha)
+    # 765 $z: ISBN originálu — přímý klíč pro Goodreads matching
+    # 765 $w: systémové/OCLC číslo originálu — pro budoucí použití
+    original_title_765: str = ""
+    original_isbn_765: list[str] = []
+    original_sysnum_765: list[str] = []
+
     for _, _, subs in instances(datas, "765"):
-        for t in subs.get("t", []):
-            if t:
-                linked.append(f"t:{t}")
+        # $t — vezmi jen první neprázdnou hodnotu jako zálohu pro original_title
+        if not original_title_765:
+            for t in subs.get("t", []):
+                t = clean(t)
+                if t:
+                    original_title_765 = t
+                    break
+
+        # $z — ISBN originálu, může být víc (různé edice)
+        for z in subs.get("z", []):
+            z_clean = z.split("(")[0].strip().rstrip(" :/.,;").strip()
+            if z_clean and z_clean not in original_isbn_765:
+                original_isbn_765.append(z_clean)
+        # $w — systémové číslo, může obsahovat OCLC ve formátu (OCoLC)12345
         for w in subs.get("w", []):
-            if w:
-                linked.append(f"w:{w}")
+            if w and w not in original_sysnum_765:
+                original_sysnum_765.append(w)
 
     genres: list[str] = []
     for g in all_values(datas, "655", "a"):
@@ -241,23 +256,26 @@ def extract_row(controls, datas) -> dict[str, str]:
     pub_year = parse_year(first(datas, "260", "c")) or parse_year(first(datas, "264", "c"))
 
     return {
-        "nkc_id": controls.get("001", ""),
-        "oclc": parse_oclc(all_values(datas, "035", "a")) or "",
-        "czech_isbn": "|".join(isbns),
-        "czech_title": clean(first(datas, "245", "a")) or "",
-        "original_title": clean(first(datas, "240", "a")) or "",
-        "author": clean(first(datas, "100", "a")) or "",
-        "secondary_authors": "|".join(secondary),
-        "czech_pub_year": str(pub_year) if pub_year is not None else "",
-        "source_lang": "|".join(source_langs),
-        "linked_records": "|".join(linked),
-        "genres": "|".join(genres),
-    }
+    "nkc_id":            controls.get("001", ""),
+    "oclc":              parse_oclc(all_values(datas, "035", "a")) or "",
+    "czech_isbn":        "|".join(isbns),
+    "czech_title":       clean(first(datas, "245", "a")) or "",
+    # Preferuj 240$a jako kanonický original_title, 765$t jako zálohu
+    "original_title":    clean(first(datas, "240", "a")) or original_title_765 or "",
+    "original_isbn":     "|".join(original_isbn_765),   # nový sloupec — z 765$z
+    "original_sysnum":   "|".join(original_sysnum_765), # nový sloupec — z 765$w
+    "author":            clean(first(datas, "100", "a")) or "",
+    "secondary_authors": "|".join(secondary),
+    "czech_pub_year":    str(pub_year) if pub_year is not None else "",
+    "source_lang":       "|".join(source_langs),
+    "genres":            "|".join(genres),
+}
 
 
 CSV_FIELDS = [
-    "nkc_id", "oclc", "czech_isbn", "czech_title", "original_title", "author",
-    "secondary_authors", "czech_pub_year", "source_lang", "linked_records", "genres",
+    "nkc_id", "oclc", "czech_isbn", "czech_title", "original_title",
+    "original_isbn", "original_sysnum",   # nahrazuje linked_records
+    "author", "secondary_authors", "czech_pub_year", "source_lang", "genres",
 ]
 
 
@@ -276,7 +294,7 @@ class Inventory:
     # Field presence on the *filtered* (translation) subset.
     has_oclc: int = 0
     has_245_a: int = 0
-    has_240_a: int = 0  # the critical one — see module docstring
+    has_original_title: int = 0  # combined 240$a + 765$t fallback coverage
     has_100_a: int = 0
     has_260_c: int = 0
     has_264_c: int = 0
@@ -284,6 +302,8 @@ class Inventory:
     has_765: int = 0
     has_655_a: int = 0
     has_020: int = 0
+    has_original_isbn: int = 0    # přidej do @dataclass
+    has_original_sysnum: int = 0  # přidej do @dataclass
 
     source_lang_counts: Counter = field(default_factory=Counter)
     pub_year_counts: Counter = field(default_factory=Counter)
@@ -295,7 +315,7 @@ class Inventory:
         if row["czech_title"]:
             self.has_245_a += 1
         if row["original_title"]:
-            self.has_240_a += 1
+            self.has_original_title += 1
         if row["author"]:
             self.has_100_a += 1
         if first(datas, "260", "c"):
@@ -307,6 +327,10 @@ class Inventory:
             self.pub_year_counts[int(row["czech_pub_year"])] += 1
         if any(t == "765" for t, _, _, _ in datas):
             self.has_765 += 1
+        if row["original_isbn"]:
+            self.has_original_isbn += 1
+        if row["original_sysnum"]:
+            self.has_original_sysnum += 1
         if all_values(datas, "655", "a"):
             self.has_655_a += 1
         if row["czech_isbn"]:
@@ -325,12 +349,14 @@ class Inventory:
             "field_coverage_on_translations": {
                 "035_oclc": round(self.has_oclc / n, 4),
                 "245_a_czech_title": round(self.has_245_a / n, 4),
-                "240_a_original_title": round(self.has_240_a / n, 4),
+                "original_title_combined": round(self.has_original_title / n, 4),  # 240$a + 765$t fallback
                 "100_a_author": round(self.has_100_a / n, 4),
                 "260_c": round(self.has_260_c / n, 4),
                 "264_c": round(self.has_264_c / n, 4),
                 "year_resolved": round(self.year_resolved / n, 4),
                 "765_link": round(self.has_765 / n, 4),
+                "765_z_original_isbn":   round(self.has_original_isbn / n, 4),
+                "765_w_original_sysnum": round(self.has_original_sysnum / n, 4),
                 "655_a_genre": round(self.has_655_a / n, 4),
                 "020_isbn": round(self.has_020 / n, 4),
             },
