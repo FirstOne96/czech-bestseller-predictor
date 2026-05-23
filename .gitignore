@@ -8,3 +8,5 @@ data/processed/*
 !data/processed/.gitkeep
 __pycache__/
 .ipynb_checkpoints/
+MATCHING*
+STEP*
