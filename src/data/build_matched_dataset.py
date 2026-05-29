@@ -26,7 +26,9 @@ Pipeline
 
 6. Join NKC + match info + GR metadata + SCKN labels into:
      data/interim/matched_dataset.csv      ← all 225K NKC records, with match_layer
-     data/interim/training_dataset.csv     ← filtered (≥2003, matched, ≥10 ratings) + dedup on work_id
+     data/interim/training_dataset.csv     ← filtered (≥2003, matched, ≥10 ratings)
+                                              dedup on (norm_author, norm_original_title)
+                                              — see Phase 7 comment for rationale
 
 Schema of training_dataset.csv preserves the columns notebook 05 reads:
     nkc_id, oclc, czech_isbn, czech_title, original_title, author, czech_pub_year,
@@ -585,16 +587,37 @@ for r in match_records:
 
 print(f"  After filter: {len(training_pool):,} candidates", flush=True)
 
-# Dedup by gr_work_id: multiple Czech editions of the same foreign work become
-# one training example. Tie-break:
-#   1. Max sckn_appearances (keep the positive if any)
-#   2. Earliest czech_pub_year (older edition wins; closer to the original publication)
+# Dedup by (normalize(author), normalize(original_title)).
 #
-# Records without a gr_work_id (Goodreads dump quirk) keep their own bucket
-# keyed by matched_book_id so we don't collapse unrelated books.
-buckets: dict[str, list[dict]] = defaultdict(list)
+# Why not gr_work_id (as in v1)? Goodreads sometimes assigns separate work_ids
+# to Czech-translated editions vs the English original, splitting what is
+# semantically one foreign work into multiple Goodreads "works". With dedup at
+# gr_work_id level, the same logical book (e.g. Orwell's Animal Farm) could
+# appear as both a positive training row (the Czech edition whose ISBN matches
+# an SCKN entry) AND multiple negative training rows (other Czech editions
+# matched to sibling work_ids without SCKN ISBN coverage). That's label noise:
+# the model sees identical author+title profiles labeled both ways.
+#
+# Grouping at (norm_author, norm_original_title) captures "same foreign work"
+# at the semantic level, regardless of how Goodreads splits or merges
+# work_ids. After dedup, the surviving row carries the maximum SCKN signal
+# across all editions, which is the correct label for the work.
+#
+# Tie-break within a group:
+#   1. Max sckn_appearances (keep the positive if any)
+#   2. Earliest czech_pub_year (older edition wins; closer to original publication)
+#
+# Records without author or original_title (rare — NKC didn't carry the fields)
+# fall back to a solo bucket keyed by matched_book_id, so they aren't collapsed
+# arbitrarily with other no-metadata rows.
+buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
 for r in training_pool:
-    key = r["gr_work_id"] or f"_solo:{r['matched_book_id']}"
+    n_author = norm_nkc_author(r["author"]) if r["author"] else ""
+    n_title  = normalize(r["original_title"]) if r["original_title"] else ""
+    if not n_author or not n_title:
+        key = ("_solo", r["matched_book_id"])
+    else:
+        key = (n_author, n_title)
     buckets[key].append(r)
 
 
@@ -607,7 +630,14 @@ def dedup_pick(group: list[dict]) -> dict:
 
 
 training: list[dict] = [dedup_pick(g) for g in buckets.values()]
-print(f"  After dedup on gr_work_id: {len(training):,} unique works", flush=True)
+solo_count = sum(1 for k in buckets if k[0] == "_solo")
+multi_count = sum(1 for g in buckets.values() if len(g) > 1)
+collapsed = sum(len(g) - 1 for g in buckets.values() if len(g) > 1)
+print(f"  After dedup on (norm_author, norm_original_title): "
+      f"{len(training):,} unique works", flush=True)
+print(f"    {multi_count:,} groups collapsed multiple editions "
+      f"({collapsed:,} duplicate rows removed)")
+print(f"    {solo_count:,} solo entries (missing author or title)")
 
 print(f"  writing {OUT_TRAINING.name} ({len(training):,} rows) …", flush=True)
 write_csv(OUT_TRAINING, training)

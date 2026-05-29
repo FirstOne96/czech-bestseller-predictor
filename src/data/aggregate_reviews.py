@@ -203,6 +203,21 @@ for _, row in train.iterrows():
     })
 
 df = pd.DataFrame(rows)
+
+# Deduplicate by matched_book_id. Two training rows can share a matched_book_id
+# when the cascade mapped slightly-different NKC original_title variants to the
+# same Goodreads edition (e.g., 'Animal farm' and 'Animal farm : a fairy story').
+# After dedup at (author, title) in build_matched_dataset, those become separate
+# training rows but still share matched_book_id. Their work-aggregated stats are
+# identical, so dropping duplicates here keeps the file clean and prevents a
+# cross-product blow-up when downstream code merges on matched_book_id.
+n_before = len(df)
+df = df.drop_duplicates(subset="matched_book_id", keep="first")
+n_collapsed = n_before - len(df)
+if n_collapsed:
+    print(f"Deduplicated output: {n_before:,} → {len(df):,} rows  "
+          f"({n_collapsed:,} duplicate matched_book_ids removed)")
+
 df.to_parquet(OUT_PARQUET, engine="pyarrow", index=False)
 df.to_csv(OUT_CSV, index=False)
 print(f"Saved {len(df):,} rows → {OUT_PARQUET.name}  +  {OUT_CSV.name}")
