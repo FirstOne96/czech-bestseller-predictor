@@ -1,0 +1,35 @@
+{
+  "_about": "SCKN -> NKC -> Goodreads match funnel. Regenerate with python src/diagnostics/match_funnel_report.py",
+  "sckn": {
+    "chart_rows": 36080,
+    "unique_isbn13": 8165
+  },
+  "sckn_to_nkc": {
+    "sckn_isbns_in_nkc": 3397,
+    "share_of_sckn": 0.416,
+    "sckn_isbns_not_in_nkc": 4768,
+    "note": "Books not in NKC are largely Czech-original titles and non-book chart categories — out of scope (translations only)."
+  },
+  "nkc_to_goodreads": {
+    "nkc_records_total": 225483,
+    "matched_to_goodreads": 55983,
+    "match_rate": 0.2483,
+    "layer_counts": {
+      "unmatched": 169500,
+      "2": 13265,
+      "1": 39376,
+      "3": 3342
+    }
+  },
+  "bestsellers": {
+    "nkc_records_sckn_positive": 3386,
+    "also_matched_to_goodreads": 1777,
+    "match_rate_among_positives": 0.5248,
+    "positive_but_unmatched": 1609
+  },
+  "modelable_set": {
+    "rows_unique_foreign_works": 24161,
+    "positives": 1287,
+    "positive_rate": 0.0533
+  }
+}

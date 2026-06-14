@@ -44,7 +44,7 @@ OUT  = REPO / "data" / "interim"
 AUTHORS_GZ = RAW / "goodreads_book_authors.json.gz"
 BOOKS_GZ   = RAW / "goodreads_books.json.gz"
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "matching"))
 from text_utils import normalize  # noqa: E402
 
 # Goodreads sometimes stores title_without_series with the series suffix still

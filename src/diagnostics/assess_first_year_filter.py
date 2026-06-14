@@ -20,7 +20,7 @@ What this script does
 5. Reports impact of filter `first_czech_year >= 2003`.
 
 Run:
-    python src/data/assess_first_year_filter.py
+    python src/diagnostics/assess_first_year_filter.py
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from collections import defaultdict
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "src" / "data"))
+sys.path.insert(0, str(REPO / "src" / "matching"))
 from text_utils import normalize, norm_nkc_author  # noqa: E402
 
 INTERIM = REPO / "data" / "interim"

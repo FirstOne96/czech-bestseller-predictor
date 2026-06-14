@@ -1,19 +1,17 @@
 """
-Smoke test for text_utils v2 (NFKD diacritic folding + fuzzy match helpers).
+Smoke test for text_utils (NFKD diacritic folding + fuzzy match helpers).
 
 Run from the repository root:
 
-    python smoke_test_text_utils.py
+    python tests/test_text_utils.py
 
-Output: one line per assertion. All ✓ means step 1 is good.
-A single ✗ means stop and investigate before moving to step 2.
-
-This file is a one-shot validation — delete it once step 1 is confirmed.
+Output: one line per assertion. All ✓ means normalization/fuzzy-matching is
+behaving as expected.
 """
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src" / "data"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "matching"))
 
 from text_utils import (
     normalize,

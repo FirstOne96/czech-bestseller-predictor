@@ -11,7 +11,7 @@ For each suspect ISBN, prints:
     a "should-have-been-matched" row that may exist under a different ISBN.
 
 Usage:
-    python src/data/diagnose_missing_sckn.py
+    python src/diagnostics/diagnose_missing_sckn.py
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "src" / "data"))
+sys.path.insert(0, str(REPO / "src" / "matching"))
 from text_utils import norm_isbn, normalize  # noqa: E402
 
 INTERIM = REPO / "data" / "interim"
