@@ -378,16 +378,54 @@ def cascade(norm_a: str, norm_t: str, czech_year: int | None,
     return None, "unmatched", 0
 
 
+# ── Phase 3.5: first_czech_year lookup ───────────────────────────────────────
+#
+# Why we need this
+# ----------------
+# SCKN labels start in 2003. A book whose first Czech translation came out long
+# before 2003 (e.g. Gatsby 1960, Lolita 1991, Animal Farm 1991) has multiple
+# reprint editions in NKC. Any reprint after 2003 inevitably gets
+# sckn_appearances=0 not because the book flopped, but because everyone who
+# wanted it had already read it long before the SCKN era.
+#
+# Labeling such reprints as "negative" is label noise — the work is not
+# comparable to a fresh acquisition. The supervisor's call: restrict training
+# to works first translated in the SCKN era.
+#
+# We compute min(czech_pub_year) per (norm_author, norm_original_title) across
+# ALL NKC records (not just matched ones), so old editions that didn't match
+# Goodreads still count when establishing "first Czech year" for a work.
+
+print("\nBuilding first_czech_year lookup over NKC …", flush=True)
+first_czech_year: dict[tuple[str, str], int] = {}
+with open(NKC_CSV, encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+        a = row.get("author", "").strip()
+        ot = row.get("original_title", "").strip()
+        try:
+            y = int(row.get("czech_pub_year") or 0)
+        except ValueError:
+            continue
+        if not a or not ot or not y:
+            continue
+        key = (norm_nkc_author(a), normalize(ot))
+        if key not in first_czech_year or y < first_czech_year[key]:
+            first_czech_year[key] = y
+print(f"  Distinct (author, title) works: {len(first_czech_year):,}", flush=True)
+
+
 # ── Phase 4: run cascade over NKC ────────────────────────────────────────────
 
 print("\nRunning cascade over NKC translations …", flush=True)
 ts = t()
 
 # Header from NKC CSV.
+# first_czech_year is a derived column attached per-row below.
 NKC_CARRY_COLS = [
     "nkc_id", "oclc", "czech_isbn", "czech_title", "original_title",
     "original_isbn", "original_sysnum",
-    "author", "secondary_authors", "czech_pub_year", "source_lang", "genres",
+    "author", "secondary_authors", "czech_pub_year", "first_czech_year",
+    "source_lang", "genres",
 ]
 
 # Per-record outputs we collect during cascade. GR metadata (ratings, shelves,
@@ -422,6 +460,14 @@ with open(NKC_CSV, encoding="utf-8") as f:
             gr_work_id = book_details[book_id][4] or ""
 
         rec = {k: row.get(k, "") for k in NKC_CARRY_COLS}
+        # Attach derived first_czech_year (min across all NKC editions of work).
+        # Empty string when (author, title) lookup misses — same fallback the
+        # original NKC fields use, keeps the CSV column shape consistent.
+        if norm_a and norm_t:
+            fy = first_czech_year.get((norm_a, norm_t))
+            rec["first_czech_year"] = str(fy) if fy is not None else ""
+        else:
+            rec["first_czech_year"] = ""
         rec.update({
             "match_layer":     layer,
             "matched_book_id": book_id or "",
@@ -562,8 +608,11 @@ write_csv(OUT_MATCHED, match_records)
 
 # Filter gates:
 #   - match_layer != "unmatched"
-#   - czech_pub_year >= 2003
-#   - gr_ratings_count >= 10 (filter, not feature; rules out empty GR entries)
+#   - czech_pub_year >= 2003          (this edition was published in SCKN era)
+#   - first_czech_year >= 2003        (the WORK was first translated in SCKN era —
+#                                       see Phase 3.5 for motivation: reprints of
+#                                       pre-SCKN classics are label noise)
+#   - gr_ratings_count >= 10          (filter, not feature; rules out empty GR entries)
 print("\nFiltering for training set …", flush=True)
 
 
@@ -575,16 +624,22 @@ def parse_int_safe(v) -> int:
 
 
 training_pool: list[dict] = []
+dropped_pre_sckn = 0
 for r in match_records:
     if r["match_layer"] == "unmatched":
         continue
     year = parse_int_safe(r["czech_pub_year"])
     if year < MIN_PUB_YEAR:
         continue
+    first_year = parse_int_safe(r["first_czech_year"])
+    if first_year and first_year < MIN_PUB_YEAR:
+        dropped_pre_sckn += 1
+        continue
     if parse_int_safe(r["gr_ratings_count"]) < MIN_GR_RATINGS_FOR_TRAIN:
         continue
     training_pool.append(r)
 
+print(f"  Dropped (first_czech_year < {MIN_PUB_YEAR}): {dropped_pre_sckn:,}", flush=True)
 print(f"  After filter: {len(training_pool):,} candidates", flush=True)
 
 # Dedup by (normalize(author), normalize(original_title)).
@@ -666,7 +721,8 @@ print()
 
 n_train = len(training)
 n_pos_train = sum(1 for r in training if parse_int_safe(r["sckn_appearances"]) >= 1)
-print(f"Training set (≥{MIN_PUB_YEAR}, matched, ≥{MIN_GR_RATINGS_FOR_TRAIN} GR ratings, dedup):")
+print(f"Training set (this edition ≥{MIN_PUB_YEAR}, first Czech ed ≥{MIN_PUB_YEAR}, "
+      f"matched, ≥{MIN_GR_RATINGS_FOR_TRAIN} GR ratings, dedup):")
 print(f"  Rows                        : {n_train:>10,}")
 print(f"  Positives (sckn ≥ 1)        : {n_pos_train:>10,}  ({n_pos_train/n_train:.1%})")
 print()
