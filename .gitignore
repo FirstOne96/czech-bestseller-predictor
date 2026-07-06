@@ -3,6 +3,8 @@ CLAUDE.md
 data/raw/*
 data/interim/*
 data/processed/*
+data/models/*
+!data/models/.gitkeep
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep
