@@ -1,38 +1,47 @@
 """
-Build the model-ready feature matrix from training_dataset.csv + pre_cutoff_stats.csv.
+Build the final model-ready dataset for TRANSLATION PREDICTION.
 
-Inputs (data/interim/)
------------------------
-- training_dataset.csv       — NKC + Goodreads + SCKN labels (from build_matched_dataset.py)
-- pre_cutoff_stats.csv        — pre-cutoff review aggregates, no leakage (from aggregate_reviews.py)
-- goodreads_author_names.json — author_id -> name (kept for reference, not used as a feature)
+Merges translation_labels.csv (candidate pool + labels + cutoffs) with
+pre_cutoff_stats.csv (leakage-free review aggregates) and derives the feature
+matrix, then writes a temporal train/val/test split.
 
-Outputs (data/processed/)
---------------------------
-- training_features.csv — full feature matrix, label + metadata columns retained
-- X_train.csv            — feature columns only (no label, no leakage-prone metadata)
-- y_train.csv            — label column only (sckn_bestseller)
+Features (all knowable before the cutoff year)
+----------------------------------------------
+Popularity (pre-cutoff, work-aggregated):
+- pre_cutoff_ratings_count, log_pre_cutoff_ratings_count
+- pre_cutoff_avg_rating           (imputed 3.5 when no ratings)
+- has_precutoff_signal            (>= 5 pre-cutoff ratings)
+- log_pre_cutoff_text_reviews
 
-Known limitations
-------------------
-- Goodreads snapshot is from 2017. Books with czech_pub_year > 2017 have
-  systematically lower pre-cutoff signal than they would in reality.
-- Overall NKC -> Goodreads match rate is ~25%. The model is implicitly
-  conditioned on a book being findable in the Goodreads catalogue.
-- Pre-cutoff signal is sparse: a large share of training records have zero
-  pre-cutoff ratings. `has_precutoff_signal` flags records with >= 5 ratings.
+Genre (shares over genre-bucket shelf counts, from the candidate pool):
+- shelf_fiction, shelf_mystery, shelf_romance, shelf_scifi,
+  shelf_nonfiction, shelf_ya, shelf_classics
+
+Language of the original (dummies): lang_eng, lang_ger, lang_fre,
+  lang_spa, lang_ita, lang_swe  (everything else / unknown = all zeros)
+
+Book age: age_at_cutoff = cutoff_year - pub_year
+
+Split key (NOT a model feature): cutoff_year
+
+Metadata kept in dataset.csv only (leakage audit): ratings_count_2017
+
+Temporal split
+--------------
+train: cutoff_year <= 2015 | val: 2016 | test: 2017
+The task is "predict future acquisitions from past ones", so the split is by
+time, never random.
+
+Inputs  : data/interim/translation_labels.csv, data/interim/pre_cutoff_stats.csv
+Outputs : data/processed/dataset.csv           (features + label + metadata)
+          data/processed/splits/{X,y}_{train,val,test}.csv
 
 Usage
 -----
-    python src/features/build_features.py        # regenerate data/processed/*.csv
-
-Or import the building blocks from a notebook for inspection:
-
-    from src.features.build_features import load_inputs, merge_precutoff, build_feature_matrix
+    python src/features/build_features.py       # seconds
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -41,181 +50,103 @@ import pandas as pd
 REPO    = Path(__file__).resolve().parents[2]
 INTERIM = REPO / "data" / "interim"
 PROC    = REPO / "data" / "processed"
+SPLITS  = PROC / "splits"
 
-# gr_popular_shelves is a JSON list of {"name": ..., "count": ...} dicts. Each
-# book's shelf counts are bucketed into these coarse genre groups and expressed
-# as a share of the book's total shelf count.
-SHELF_BUCKETS = {
-    "fiction":     {"fiction", "literary-fiction", "contemporary", "literary"},
-    "mystery":     {"mystery", "thriller", "crime", "suspense", "detective"},
-    "romance":     {"romance", "love", "chick-lit"},
-    "scifi":       {"science-fiction", "sci-fi", "fantasy", "speculative-fiction"},
-    "nonfiction":  {"non-fiction", "nonfiction", "biography", "memoir",
-                    "history", "self-help", "true-crime"},
-    "ya":          {"young-adult", "ya", "teen", "childrens", "children"},
-    "classics":    {"classics", "classic", "literary-classics"},
-}
+LABELS_CSV = INTERIM / "translation_labels.csv"
+STATS_CSV  = INTERIM / "pre_cutoff_stats.csv"
 
-# Top source languages in the NKC cohort.
-SOURCE_LANGS = ["eng", "ger", "fre", "rus"]
+LABEL_COL = "translated_cz"
+YEAR_COL  = "cutoff_year"
 
-# Books with zero pre-cutoff ratings are typically obscure titles; imputing the
-# global median (~4.0) would overstate their quality. Use 3.5 (mid-scale neutral).
+TRAIN_MAX_YEAR = 2015
+VAL_YEAR       = 2016
+TEST_YEAR      = 2017
+
+LANGS = ["eng", "ger", "fre", "spa", "ita", "swe"]
+SHELF_COLS = ["shelf_fiction", "shelf_mystery", "shelf_romance", "shelf_scifi",
+              "shelf_nonfiction", "shelf_ya", "shelf_classics"]
+
+# Books with zero pre-cutoff ratings are typically obscure; imputing the global
+# median (~4.0) would overstate their quality. 3.5 = mid-scale neutral.
 IMPUTE_AVG_RATING = 3.5
 
-# Columns kept in training_features.csv for context/leakage-auditing but
-# excluded from X_train.csv.
-METADATA_COLS = {"sckn_bestseller", "gr_ratings_count"}
+# Kept in dataset.csv for auditing, never in X (temporal leakage / identifiers).
+METADATA_COLS = ["work_id", "rep_book_id", "title", "language", "pub_year",
+                 "n_editions", "ratings_count_2017", "text_reviews_2017",
+                 LABEL_COL]
 
 
-# ── Step 1 — load & merge ────────────────────────────────────────────────────
+def build_dataset() -> pd.DataFrame:
+    labels = pd.read_csv(LABELS_CSV, dtype={"work_id": str, "rep_book_id": str})
+    stats  = pd.read_csv(STATS_CSV,  dtype={"work_id": str})
 
-def load_inputs(interim: Path = INTERIM):
-    """Load the three raw inputs. Returns (train_df, pre_cutoff_df, author_names)."""
-    train = pd.read_csv(interim / "training_dataset.csv", dtype=str)
-    pre = pd.read_csv(interim / "pre_cutoff_stats.csv", dtype=str)
-    with open(interim / "goodreads_author_names.json", encoding="utf-8") as f:
-        author_names: dict[str, str] = json.load(f)
-    return train, pre, author_names
-
-
-def merge_precutoff(train: pd.DataFrame, pre: pd.DataFrame) -> pd.DataFrame:
-    """Left-join training rows with pre-cutoff review aggregates on matched_book_id.
-
-    pre_cutoff_stats can contain duplicate matched_book_id rows when multiple
-    training rows share the same Goodreads edition (different NKC
-    original_title variants that the cascade mapped to the same book_id).
-    Since the stats are work-aggregated, every duplicate carries identical
-    values, so we drop them before the merge to prevent a cross-product blow-up.
-    """
-    pre_unique = pre.drop_duplicates(subset="matched_book_id", keep="first")
-
-    df = train.merge(
-        pre_unique[["matched_book_id", "pre_cutoff_ratings_count",
-                     "pre_cutoff_avg_rating", "pre_cutoff_reviews_with_text"]],
-        on="matched_book_id",
-        how="left",
+    df = labels.merge(
+        stats[["work_id", "pre_cutoff_ratings_count", "pre_cutoff_avg_rating",
+               "pre_cutoff_reviews_with_text"]],
+        on="work_id", how="left",
     )
-    assert len(df) == len(train), f"merge bloat — {len(df)} != {len(train)}"
+    assert len(df) == len(labels), "merge bloat — duplicate work_ids in stats"
 
-    df["pre_cutoff_ratings_count"] = pd.to_numeric(
-        df["pre_cutoff_ratings_count"], errors="coerce").fillna(0).astype(int)
-    df["pre_cutoff_avg_rating"] = pd.to_numeric(
-        df["pre_cutoff_avg_rating"], errors="coerce")
-    df["pre_cutoff_reviews_with_text"] = pd.to_numeric(
-        df["pre_cutoff_reviews_with_text"], errors="coerce").fillna(0).astype(int)
+    df["pre_cutoff_ratings_count"] = (
+        df["pre_cutoff_ratings_count"].fillna(0).astype(int))
+    df["pre_cutoff_reviews_with_text"] = (
+        df["pre_cutoff_reviews_with_text"].fillna(0).astype(int))
+
+    # ── Derived features ──────────────────────────────────────────────────────
+    df["log_pre_cutoff_ratings_count"] = np.log1p(df["pre_cutoff_ratings_count"])
+    df["log_pre_cutoff_text_reviews"]  = np.log1p(df["pre_cutoff_reviews_with_text"])
+    df["has_precutoff_signal"] = (df["pre_cutoff_ratings_count"] >= 5).astype(int)
+    df["pre_cutoff_avg_rating"] = df["pre_cutoff_avg_rating"].fillna(IMPUTE_AVG_RATING)
+    df["age_at_cutoff"] = (df[YEAR_COL] - df["pub_year"]).astype(int)
+
+    lang = df["language"].fillna("").str.lower()
+    for lg in LANGS:
+        df[f"lang_{lg}"] = (lang == lg).astype(int)
 
     return df
 
 
-# ── Step 2 — feature blocks ──────────────────────────────────────────────────
-
-def shelf_shares(shelves_json: str) -> dict[str, float]:
-    """Return genre-bucket share of total shelf counts for one book."""
-    try:
-        shelves = json.loads(shelves_json) if isinstance(shelves_json, str) else []
-    except (json.JSONDecodeError, TypeError):
-        shelves = []
-
-    bucket_totals = {b: 0 for b in SHELF_BUCKETS}
-    grand_total = 0
-
-    for entry in shelves:
-        name = str(entry.get("name", "")).lower().replace(" ", "-")
-        count = int(entry.get("count", 0) or 0)
-        grand_total += count
-        for bucket, keywords in SHELF_BUCKETS.items():
-            if name in keywords:
-                bucket_totals[bucket] += count
-
-    if grand_total == 0:
-        return {f"shelf_{b}": 0.0 for b in SHELF_BUCKETS}
-    return {f"shelf_{b}": round(bucket_totals[b] / grand_total, 6) for b in SHELF_BUCKETS}
+def feature_cols(df: pd.DataFrame) -> list[str]:
+    """Model features — excludes label, split key, and metadata."""
+    excluded = set(METADATA_COLS) | {YEAR_COL, "pre_cutoff_reviews_with_text"}
+    return [c for c in df.columns if c not in excluded]
 
 
-def _popularity_features(df: pd.DataFrame) -> pd.DataFrame:
-    feat = pd.DataFrame(index=df.index)
-    feat["pre_cutoff_ratings_count"] = df["pre_cutoff_ratings_count"]
-    feat["pre_cutoff_avg_rating"] = df["pre_cutoff_avg_rating"]
-    # Log-transformed count (handles heavy tail; log1p avoids log(0)).
-    feat["log_pre_cutoff_ratings_count"] = np.log1p(df["pre_cutoff_ratings_count"])
-    # Binary flag: >= 5 pre-cutoff ratings -> enough signal to trust the average.
-    feat["has_precutoff_signal"] = (df["pre_cutoff_ratings_count"] >= 5).astype(int)
-    # Overall Goodreads ratings count — metadata only, excluded from X_train
-    # (temporal leakage).
-    feat["gr_ratings_count"] = pd.to_numeric(df["gr_ratings_count"], errors="coerce").fillna(0)
-    return feat
+def temporal_split(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    masks = {
+        "train": df[YEAR_COL] <= TRAIN_MAX_YEAR,
+        "val":   df[YEAR_COL] == VAL_YEAR,
+        "test":  df[YEAR_COL] == TEST_YEAR,
+    }
+    total = sum(int(m.sum()) for m in masks.values())
+    assert total == len(df), "split masks do not partition the dataset"
+    return {name: df[m].reset_index(drop=True) for name, m in masks.items()}
 
-
-def _shelf_features(df: pd.DataFrame) -> pd.DataFrame:
-    return pd.DataFrame(df["gr_popular_shelves"].apply(shelf_shares).tolist(), index=df.index)
-
-
-def _language_features(df: pd.DataFrame) -> pd.DataFrame:
-    feat = pd.DataFrame(index=df.index)
-    src = df["source_lang"].str.strip().str.lower()
-    for lang in SOURCE_LANGS:
-        feat[f"lang_{lang}"] = (src == lang).astype(int)
-    return feat
-
-
-def _temporal_features(df: pd.DataFrame) -> pd.DataFrame:
-    feat = pd.DataFrame(index=df.index)
-    feat["czech_pub_year"] = pd.to_numeric(df["czech_pub_year"], errors="coerce").astype("Int64")
-    return feat
-
-
-def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    """Assemble the full feature matrix (features + metadata + label) from the
-    merged training/pre-cutoff dataframe produced by ``merge_precutoff``.
-    """
-    feat = pd.concat([
-        _popularity_features(df),
-        _shelf_features(df),
-        _language_features(df),
-        _temporal_features(df),
-    ], axis=1)
-
-    feat["sckn_bestseller"] = (df["sckn_bestseller"].astype(str).str.lower() == "true").astype(int)
-
-    # Fixed imputation for pre_cutoff_avg_rating (see IMPUTE_AVG_RATING docstring above).
-    feat["pre_cutoff_avg_rating"] = feat["pre_cutoff_avg_rating"].fillna(IMPUTE_AVG_RATING)
-
-    return feat
-
-
-def feature_cols(feat: pd.DataFrame) -> list[str]:
-    """Feature columns only — excludes label and leakage-prone metadata."""
-    return [c for c in feat.columns if c not in METADATA_COLS]
-
-
-# ── Step 3 — save outputs ────────────────────────────────────────────────────
-
-def save_outputs(feat: pd.DataFrame, proc: Path = PROC) -> None:
-    proc.mkdir(parents=True, exist_ok=True)
-
-    feat.to_csv(proc / "training_features.csv", index=False)
-
-    X = feat[feature_cols(feat)]
-    X.to_csv(proc / "X_train.csv", index=False)
-
-    y = feat[["sckn_bestseller"]]
-    y.to_csv(proc / "y_train.csv", index=False)
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> pd.DataFrame:
-    train, pre, _author_names = load_inputs()
-    df = merge_precutoff(train, pre)
-    feat = build_feature_matrix(df)
-    save_outputs(feat)
+    df = build_dataset()
+    fcols = feature_cols(df)
 
-    X = feat[feature_cols(feat)]
-    print(f"Saved {len(feat):,} rows -> training_features.csv")
-    print(f"Saved X_train.csv  shape={X.shape}")
-    print(f"Saved y_train.csv  shape=({len(feat)}, 1)")
-    return feat
+    PROC.mkdir(parents=True, exist_ok=True)
+    SPLITS.mkdir(parents=True, exist_ok=True)
+    df.to_csv(PROC / "dataset.csv", index=False)
+
+    parts = temporal_split(df)
+    print(f"Dataset: {len(df):,} rows, {int(df[LABEL_COL].sum()):,} positives "
+          f"({df[LABEL_COL].mean():.2%})")
+    print(f"Features ({len(fcols)}): {fcols}\n")
+
+    for name, part in parts.items():
+        part[fcols].to_csv(SPLITS / f"X_{name}.csv", index=False)
+        part[[LABEL_COL]].to_csv(SPLITS / f"y_{name}.csv", index=False)
+        print(f"  {name:<5} : {len(part):>8,} rows | "
+              f"{int(part[LABEL_COL].sum()):>6,} pos "
+              f"({part[LABEL_COL].mean():.2%}) | years "
+              f"{int(part[YEAR_COL].min())}-{int(part[YEAR_COL].max())}")
+
+    print(f"\n→ {PROC / 'dataset.csv'}")
+    print(f"→ {SPLITS}/X_*.csv, y_*.csv")
+    return df
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 # Data-Driven Selection of Foreign Books for Czech Translation
 
-Bachelor's thesis project. Ranks foreign-language books as candidates for
-Czech translation by how closely their reader-community profile (Goodreads)
-resembles that of foreign books whose Czech translations later succeeded on
-the SCKN bestseller charts. Combines the Czech National Library catalogue
-(NKC), a 2017 Goodreads dataset dump, and scraped SCKN weekly charts.
+Bachelor's thesis project. Predicts which foreign books Czech publishers will
+pick for translation, learning from past acquisitions: Goodreads works matched
+to Czech translation records in the National Library catalogue (NKC) versus
+comparable foreign works never translated. All features are leakage-free
+(computed strictly before each book's decision cutoff).
 
-See `CLAUDE.md` for the full project documentation (pipeline, matching
-cascade, leakage rules, modeling).
+Everything runs from `notebooks/main.ipynb`. See `CLAUDE.md` for full
+documentation (pipeline, matching cascade, label and leakage rules).
